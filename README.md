@@ -7,12 +7,16 @@ good ones to Telegram. Runs on `fatman` (Pi 5) beside the rest of the fleet.
 Stdlib-only Python — no venv, no SDKs, no build step.
 
 ```
-┌──────────┐   redfin ──┐
-│  crawler │   craigslist ─┤→ filter → dedupe → score → SQLite
-└──────────┘   zillow* ──┘                              │
-                                          ┌─────────────┴─────────────┐
+┌──────────┐  redfin ─────┐
+│  crawler │  rent.com ───┤→ filter → dedupe → enrich → score → SQLite
+└──────────┘  craigslist ─┤          (sqft, walk)              │
+               zillow* ───┘                                    │
+                                          ┌────────────────────┴──────────┐
                                     Telegram bot            HTML dashboard
-                                    (commands + alerts)      :8810
+                                    (commands + alerts)      :8810 + ratings
+                                                                   │
+                                                              learn.py
+                                                        (weights ← feedback)
 ```
 
 `*` proxy-gated, see [Sources](#sources).
@@ -31,29 +35,102 @@ Set in `config.json`, no code changes needed:
 
 ### Scoring
 
-Five weighted components, each 0–1 before weighting, normalised to 0–100.
+Six weighted components, each 0–1 before weighting, normalised to 0–100.
 Weights live in `config.json` and do not need to sum to anything in
 particular.
 
 | component | weight | what earns credit |
 |---|---:|---|
 | `price` | 25 | cheaper inside the budget band |
-| `mueller` | 25 | proximity to Mueller |
-| `mlk_station` | 20 | proximity to the rail station |
+| `mueller` | 25 | walking proximity to Mueller |
 | `space` | 20 | square footage, 700 → 1800 sq ft |
+| `mlk_station` | 20 | walking proximity to the rail station |
+| `walk` | 15 | what you can reach on foot (see below) |
 | `house_bonus` | 10 | anything that is not an apartment complex |
 
 Proximity credit is full inside `full_credit_mi`, zero past `zero_credit_mi`,
 linear between — easy to read off the dashboard and easy to retune.
 
-Two deliberate choices worth knowing:
+## Walkability
 
-- **Distances are crow-flies**, not walking routes. For the MLK Jr Station
-  anchor that understates the real walk wherever I-35 or the rail corridor is
-  in the way. Treat it as a shortlist filter, then check the actual route.
-- **Missing square footage scores 0.4, not 0.** Plenty of good by-owner house
-  listings just omit it, and zeroing them would bury the exact listings we are
-  looking for.
+Straight-line distance lies around Mueller. I-35, the rail corridor and the
+golf course all mean two points 0.6 mi apart on a map can be a 1.9 mi walk, so
+`walk.py` measures the real thing using two free, keyless services:
+
+- **Routed anchor walks** — OSRM's public pedestrian profile
+  (`routing.openstreetmap.de/routed-foot`). One `table` request routes every
+  listing against both anchors at once, which is what makes this affordable.
+  Distances shown on the dashboard are real walks, with the minutes beside
+  them; anything that could not be routed is labelled `direct` and falls back
+  to crow-flies rather than disappearing.
+- **Amenity density** — Overpass, counting what you can actually walk to:
+  groceries, food, transit, parks, errands, schools. Scored the way Walk Score
+  works, with distance decay and diminishing returns per category, so twenty
+  cafés never beat a café plus a grocery plus a park.
+
+Both are cached in SQLite for weeks — street networks and grocery stores do
+not move — so a normal crawl makes no network calls here at all. One
+deliberate asymmetry: **anchors are routed, amenities are not.** Routing every
+listing to all ~1,800 nearby amenities would be hundreds of thousands of legs
+per crawl, so amenity distance is haversine inflated by a 1.35 detour factor,
+which is a fair estimator in aggregate and does not pretend to be more.
+
+## Square footage
+
+Square footage is the whole point — a house with *more space* than The
+Platform or Starlight for the same money — and it is the field sources most
+often omit, precisely on the by-owner house listings that matter most.
+`sqft.py` recovers it in three ordered strategies, and every listing carries a
+`sqft_basis` saying which one was used:
+
+| basis | meaning |
+|---|---|
+| `reported` | the source gave a number |
+| `parsed` | pulled out of the listing text (`2/1 1,150 sqft bungalow`) |
+| `estimated` | the median of comparable listings, same beds and property type |
+
+Estimates are learned from our own corpus rather than a static table, so they
+are Austin-specific and improve as the database grows, and they fall back to a
+conservative table below five comparables. **An estimate never earns full
+space credit** — it is shrunk toward a neutral prior, so a listing cannot win
+on space it has not proven it has. Estimated sizes render with a `~` on the
+dashboard, in Telegram, and in `agent.py top`.
+
+The payoff is `$/sqft`, which is the number that actually answers "more space
+for the money", and the one the baselines are compared on.
+
+## Rating listings, and what the agent does with it
+
+Every card on the dashboard has a **rate** control: like or pass, plus a
+free-text reason. It is a plain HTML form — no JavaScript anywhere in the
+dashboard — so it works the same over Tailscale from a phone. The same thing
+works from Telegram with `/like <id> why…` and `/dislike <id> why…`.
+
+Verdicts are append-only: changing your mind is kept, because "liked it, then
+saw it and hated it" is stronger signal than either verdict alone. Each one
+snapshots the listing's score and component breakdown *as judged*, so a later
+retune does not silently invalidate the history.
+
+`learn.py` reads that back and asks which components actually predict what you
+like. It splits the component credits by verdict, compares the means, and
+suggests weight changes — with three guards, because the failure mode of a
+self-tuning system is confidently learning from four data points:
+
+- **minimum sample** — below four verdicts on each side it suggests nothing,
+  and says so
+- **effect size** — the gap is measured against the spread, so a large gap
+  between two noisy, overlapping groups is not treated as evidence
+- **bounded steps** — no weight moves more than 35% in one round
+
+It is read-only by default. The dashboard's *What that implies* section shows
+its current read; `python3 learn.py` prints it; `--apply` is the explicit
+opt-in and keeps a timestamped backup of `config.json`.
+
+For an LLM agent, `learn.py --export feedback.jsonl` writes each verdict
+paired with its listing and the raw reason text. The arithmetic can tell you
+*that* walkability predicts a like; only the sentences can tell you it was
+really about a walk with no sidewalk. `/api/feedback` and `/api/learn` serve
+the same data over HTTP.
 
 ## Sources
 
@@ -62,11 +139,45 @@ Every site was probed directly before being wired up:
 | source | status | notes |
 |---|---|---|
 | **Redfin** | ✅ works | `search/rentals` + `floorPlans`. The workhorse. |
+| **rent.com** | ✅ works | RentPath. Neighbourhood-targeted, inline floor plans. |
 | **Craigslist** | ✅ works | `sapi.craigslist.org/web/v8`, by-owner houses Redfin never sees. |
 | Zillow | 🔑 needs key | PerimeterX captcha on every datacenter IP. Implemented, off by default. |
 | HotPads | ⛔ stub | Zillow-owned: same wall, same inventory. Deliberately not implemented. |
 | Instagram | ⛔ stub | No public API; needs a logged-in session for thin coverage. Deferred. |
-| apartments.com, Trulia, Zumper, realtor.com | ⛔ | All refused (403/429). Not wired up. |
+| apartments.com, homes.com, RentCafe | ⛔ | Flat `Access Denied` on every request. |
+| Trulia | ⛔ | Zillow-owned, same PerimeterX wall. |
+| realtor.com | ⛔ | 429 on every request, no honest way through. |
+| Zumper / PadMapper | ⛔ | JS shell; its API rejects unsigned calls (`451 missing parameter: url`). |
+| apartmentlist.com | ⛔ | Serves 200 but renders client-side; no listing data in the HTML. |
+
+Everything in that table was probed directly rather than assumed, and the
+losers were re-probed when walkability went in — which is how rent.com turned
+up. It had been written off with the rest, but it answers normally.
+
+### rent.com
+
+The best-behaved source we have. An ordinary Next.js page whose
+`__NEXT_DATA__` carries the whole result set — coordinates, per-floorplan
+beds/baths/sqft/rent, availability — with no key, no proxy, and no second
+request per property.
+
+Two things make it cheap to crawl politely. **Neighbourhood paths**:
+`/texas/austin-apartments/mueller-neighborhood` returns 113 properties where
+the city-wide path returns 4,136, so we crawl a handful of neighbourhoods
+around the anchors instead of paginating Austin. **Inline floor plans**:
+unlike Redfin there is no follow-up request to turn "1–3 beds, $604–1838" into
+an answerable 2BR price.
+
+The neighbourhood list is discovered, not hardcoded — each page carries
+`seoLinks.nearby.neighborhoods` with distances, so seeding with Mueller finds
+the other fourteen inside the radius by itself and picks up new ones without a
+code change.
+
+One quirk worth knowing: rent.com soft-throttles by answering **`202 Accepted`
+with a zero-length body** rather than a 4xx. That is a success as far as
+urllib is concerned and an empty page as far as we are concerned, so requests
+are spaced 2.5s apart and retried with a long backoff. Without that, a crawl
+silently loses about a fifth of its requests.
 
 Redfin does a lot of work here: its rental index ingests **Zillow and RentPath
 feeds** (visible per-record in `feedOriginalSource`), so much of what Zillow
@@ -127,6 +238,25 @@ python3 agent.py top 15                            # see the ranking
 prints the line to add it to the encrypted fleet store
 (`~/Desktop/fleet-secrets/edit-secrets.sh`).
 
+## Known gaps
+
+Logged rather than fixed, so they are not rediscovered as surprises:
+
+- **Cross-source duplicates can still slip through.** Listings are identified
+  by address first (normalised for case, punctuation and street-suffix
+  abbreviations, so `Danbury Square` and `Danbury Sq` collapse), falling back
+  to coordinates. A record with *no* address relies on coordinates alone, and
+  two sources geocoding the same building can land either side of a
+  4-decimal rounding boundary (~11 m) and survive as two cards. The real fix
+  is to match on *either* identity via a union-find rather than one key per
+  record; it is a contained change, just not a small one.
+- **rent.com yield varies run to run.** Its 202-throttle means a cold-cache
+  crawl returns fewer listings than a warm one (191 vs 359 observed). The
+  retry and circuit-breaker keep it polite and bounded; coverage catches up
+  on the next cycle rather than in any single run.
+- **Zillow's parser is unverified.** It is written against the documented page
+  structure but has never run end-to-end, because that needs a paid proxy key.
+
 ## Where things live
 
 | | |
@@ -145,13 +275,16 @@ prints the line to add it to the encrypted fleet store
 
 ```
 agent.py       daemon: crawl loop + bot + dashboard threads, and the CLI
-crawler.py     one pass: geo gate → filters → dedupe → score → upsert
+crawler.py     one pass: geo gate → filters → dedupe → enrich → score → upsert
 sources/       one module per site; each may raise, the run continues
 score.py       the weighted components above
 geo.py         haversine, bounding boxes, proximity credit
-store.py       SQLite (WAL): listings, price history, runs, pins
+walk.py        routed pedestrian distance (OSRM) + amenity density (Overpass)
+sqft.py        square-footage parsing, estimation and $/sqft
+store.py       SQLite (WAL): listings, price history, runs, pins, feedback
+learn.py       reads feedback back into suggested scoring weights
 bot.py         Telegram long-poll commander + push alerts
-dashboard.py   server-side HTML, no JS, no CDN
+dashboard.py   server-side HTML, no JS, no CDN, plus the rating form
 ```
 
 Graceful degradation is the rule throughout, same as the rest of the fleet: a

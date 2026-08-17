@@ -15,7 +15,8 @@ ssh "$HOST" 'mkdir -p ~/leasing_agent/sources ~/leasing_agent/data ~/.config/sys
 
 rsync -a --delete --exclude '__pycache__' \
   "$DIR/agent.py" "$DIR/bot.py" "$DIR/crawler.py" "$DIR/dashboard.py" \
-  "$DIR/geo.py" "$DIR/score.py" "$DIR/store.py" "$DIR/config.json" \
+  "$DIR/geo.py" "$DIR/learn.py" "$DIR/score.py" "$DIR/sqft.py" \
+  "$DIR/store.py" "$DIR/walk.py" "$DIR/config.json" \
   "$HOST:leasing_agent/"
 rsync -a --delete --exclude '__pycache__' "$DIR/sources/" "$HOST:leasing_agent/sources/"
 

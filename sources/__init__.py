@@ -56,15 +56,19 @@ class Ctx:
         return self.secrets.get("SCRAPER_API_KEY") or ""
 
     def get(self, url, headers=None, cache_ttl=0, via_proxy=False,
-            min_gap=0.6, timeout=30):
-        """GET a URL, optionally through the scraping proxy and the cache.
+            min_gap=0.6, timeout=30, data=None):
+        """Fetch a URL, optionally through the scraping proxy and the cache.
 
         `min_gap` spaces out consecutive requests to the same host so a crawl
         never looks like a hammering. `cache_ttl` seconds of 0 disables the
         SQLite response cache (used for the per-complex floorplan lookups,
         which dominate a Redfin crawl).
+
+        Passing `data` makes it a POST — Overpass takes its query in the body.
+        POSTs skip the cache read/write here because the URL alone no longer
+        identifies the response; walk.py caches those under its own key.
         """
-        if cache_ttl:
+        if cache_ttl and data is None:
             hit = self.store.cache_get(url, cache_ttl)
             if hit is not None:
                 return hit
@@ -92,7 +96,7 @@ class Ctx:
                  "Accept-Language": "en-US,en;q=0.9",
                  "Accept-Encoding": "gzip"}
             h.update(headers or {})
-            req = urllib.request.Request(target, headers=h)
+            req = urllib.request.Request(target, headers=h, data=data)
             try:
                 with urllib.request.urlopen(req, timeout=timeout) as r:
                     body = r.read()
@@ -105,7 +109,7 @@ class Ctx:
                 raise SourceError(f"network: {e}") from e
 
         text = body.decode("utf-8", "replace")
-        if cache_ttl:
+        if cache_ttl and data is None:
             self.store.cache_put(url, text)
         return text
 
@@ -122,12 +126,10 @@ class Ctx:
 
 def load(cfg) -> list:
     """Enabled source modules, in a stable order."""
-    from . import craigslist, hotpads, instagram, redfin, zillow
-    all_mods = [redfin, craigslist, zillow, hotpads, instagram]
     toggles = cfg.get("sources", {})
-    return [m for m in all_mods if toggles.get(m.NAME)]
+    return [m for m in all_modules() if toggles.get(m.NAME)]
 
 
 def all_modules() -> list:
-    from . import craigslist, hotpads, instagram, redfin, zillow
-    return [redfin, craigslist, zillow, hotpads, instagram]
+    from . import craigslist, hotpads, instagram, redfin, rent, zillow
+    return [redfin, rent, craigslist, zillow, hotpads, instagram]

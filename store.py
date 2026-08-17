@@ -35,7 +35,12 @@ CREATE TABLE IF NOT EXISTS listings (
     photo         TEXT,
     description   TEXT,
     score         REAL,
-    distances     TEXT,          -- JSON {anchor: miles}
+    distances     TEXT,          -- JSON {anchor: {mi, straight_mi, walk_min, basis}}
+    parts         TEXT,          -- JSON {component: credit} behind the score
+    sqft_basis    TEXT,          -- reported | parsed | estimated | missing
+    ppsf          REAL,          -- rent per square foot
+    walk_credit   REAL,          -- 0..1 amenity density (walk.py)
+    walk_counts   TEXT,          -- JSON {category: reachable count}
     is_baseline   INTEGER DEFAULT 0,
     first_seen    TEXT,
     last_seen     TEXT,
@@ -80,6 +85,25 @@ CREATE TABLE IF NOT EXISTS http_cache (
     body     TEXT,
     fetched  REAL
 );
+
+-- Append-only: every verdict is kept, including changes of mind, because
+-- "liked it, then saw it and hated it" is a stronger training signal than
+-- either verdict alone. Readers take the latest per listing; the learner
+-- gets the whole trail.
+CREATE TABLE IF NOT EXISTS feedback (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    listing_id TEXT NOT NULL,
+    verdict    TEXT NOT NULL,          -- 'like' | 'dislike'
+    reason     TEXT,
+    source     TEXT,                   -- 'dashboard' | 'telegram'
+    -- The score and component breakdown as they stood when the verdict was
+    -- given. Without this snapshot a retune silently invalidates the whole
+    -- history, since the listing's current score would no longer be the one
+    -- being judged.
+    snapshot   TEXT,
+    created    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_feedback_listing ON feedback(listing_id, id DESC);
 """
 
 
@@ -91,12 +115,32 @@ def now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%S")
 
 
+# Columns added after the first release. CREATE TABLE IF NOT EXISTS will not
+# add a column to a table that already exists, and fatman has a live database
+# we are not about to drop, so new columns are ALTERed in on open.
+MIGRATIONS = [
+    ("listings", "parts", "TEXT"),
+    ("listings", "sqft_basis", "TEXT"),
+    ("listings", "ppsf", "REAL"),
+    ("listings", "walk_credit", "REAL"),
+    ("listings", "walk_counts", "TEXT"),
+]
+
+
 class Store:
     def __init__(self, path: str):
         self.path = path
         self._lock = threading.Lock()
         with self._conn() as c:
             c.executescript(SCHEMA)
+            self._migrate(c)
+
+    @staticmethod
+    def _migrate(c) -> None:
+        for table, column, coltype in MIGRATIONS:
+            have = {r["name"] for r in c.execute(f"PRAGMA table_info({table})")}
+            if column not in have:
+                c.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")
 
     def _conn(self):
         c = sqlite3.connect(self.path, timeout=30)
@@ -134,6 +178,11 @@ class Store:
                 photo=rec.get("photo"), description=rec.get("description"),
                 score=rec.get("score"),
                 distances=json.dumps(rec.get("distances") or {}),
+                parts=json.dumps(rec.get("parts") or {}),
+                sqft_basis=rec.get("sqft_basis"),
+                ppsf=rec.get("ppsf"),
+                walk_credit=rec.get("walk_credit"),
+                walk_counts=json.dumps(rec.get("walk_counts") or {}),
                 is_baseline=int(bool(rec.get("is_baseline"))),
                 last_seen=ts, active=1,
                 raw=json.dumps(rec.get("raw") or {})[:20000],
@@ -205,6 +254,73 @@ class Store:
     def set_meta(self, key: str, value: str) -> None:
         with self._lock, self._conn() as c:
             c.execute("INSERT OR REPLACE INTO meta VALUES (?,?)", (key, str(value)))
+
+    # ── feedback ────────────────────────────────────────────────────────────
+
+    def add_feedback(self, lid: str, verdict: str, reason: str = "",
+                     source: str = "dashboard") -> int:
+        """Record a like/dislike. Returns the feedback row id.
+
+        The listing's current score and components are snapshotted alongside
+        so the verdict stays interpretable after a retune.
+        """
+        if verdict not in ("like", "dislike"):
+            raise ValueError(f"verdict must be like/dislike, got {verdict!r}")
+        with self._lock, self._conn() as c:
+            row = c.execute(
+                "SELECT score, parts, price, beds, sqft, ppsf, prop_type, "
+                "walk_credit, distances, source AS listing_source, "
+                "property_name, title FROM listings WHERE id=?",
+                (lid,)).fetchone()
+            snapshot = json.dumps(dict(row) if row else {})
+            cur = c.execute(
+                "INSERT INTO feedback (listing_id, verdict, reason, source, "
+                "snapshot, created) VALUES (?,?,?,?,?,?)",
+                (lid, verdict, (reason or "").strip()[:2000], source,
+                 snapshot, now()))
+            return cur.lastrowid
+
+    def latest_feedback(self) -> dict:
+        """{listing_id: row} — the most recent verdict per listing."""
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT f.* FROM feedback f JOIN (SELECT listing_id, "
+                "MAX(id) AS id FROM feedback GROUP BY listing_id) m "
+                "ON m.id = f.id")
+            return {r["listing_id"]: dict(r) for r in rows}
+
+    def feedback_for(self, lid: str) -> list:
+        with self._conn() as c:
+            return [dict(r) for r in c.execute(
+                "SELECT * FROM feedback WHERE listing_id=? ORDER BY id",
+                (lid,))]
+
+    def all_feedback(self, limit: int = 1000) -> list:
+        """Every verdict with its listing joined on, newest first.
+
+        This is what the learner and any external agent read.
+        """
+        with self._conn() as c:
+            return [dict(r) for r in c.execute("""
+                SELECT f.id, f.listing_id, f.verdict, f.reason, f.source,
+                       f.snapshot, f.created,
+                       l.title, l.property_name, l.address, l.url, l.price,
+                       l.beds, l.baths, l.sqft, l.sqft_basis, l.ppsf,
+                       l.prop_type, l.score, l.parts, l.distances,
+                       l.walk_credit, l.source AS listing_source
+                FROM feedback f
+                LEFT JOIN listings l ON l.id = f.listing_id
+                ORDER BY f.id DESC LIMIT ?""", (limit,))]
+
+    def feedback_counts(self) -> dict:
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT verdict, COUNT(*) AS n FROM (SELECT f.listing_id, "
+                "f.verdict FROM feedback f JOIN (SELECT listing_id, MAX(id) "
+                "AS id FROM feedback GROUP BY listing_id) m ON m.id=f.id) "
+                "GROUP BY verdict")
+            out = {r["verdict"]: r["n"] for r in rows}
+        return {"like": out.get("like", 0), "dislike": out.get("dislike", 0)}
 
     # ── http cache (floorplan lookups are the expensive part of a crawl) ────
 
@@ -320,6 +436,9 @@ class Store:
                            ('house','townhouse','duplex','condo') THEN 1 ELSE 0 END) AS houses,
                        SUM(CASE WHEN active=1 AND prop_type='apartment' THEN 1 ELSE 0 END) AS apts,
                        AVG(CASE WHEN active=1 THEN price END) AS avg_price,
-                       MIN(CASE WHEN active=1 THEN price END) AS min_price
+                       MIN(CASE WHEN active=1 THEN price END) AS min_price,
+                       MIN(CASE WHEN active=1 AND sqft_basis IN
+                           ('reported','parsed') THEN ppsf END) AS best_ppsf,
+                       AVG(CASE WHEN active=1 THEN walk_credit END) AS avg_walk
                 FROM listings""").fetchone()
             return dict(row)

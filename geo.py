@@ -1,9 +1,11 @@
 """geo — distances and search boxes. Stdlib only (no SDK on purpose).
 
-Everything here is crow-flies haversine. That is deliberately not walking
-distance: for the MLK Jr Station anchor a straight line understates the walk
-whenever I-35 or the rail corridor is in the way. Treat station distance as a
-shortlist filter, then eyeball the actual route before touring.
+Everything here is crow-flies haversine, which around Mueller understates the
+real walk wherever I-35, the rail corridor or the golf course is in the way.
+That is why `walk.py` exists: it routes the anchor legs over the actual
+pedestrian network and this module is the fallback for when that is
+unavailable. Straight-line distance is still the right tool for the coarse
+radius gate, which is all `bbox` and `within_radius` are used for.
 """
 import math
 
@@ -49,16 +51,36 @@ def anchor_distances(lat, lon, anchors: dict) -> dict:
             for k, a in anchors.items()}
 
 
-def proximity_credit(dist_mi: float, full_mi: float, zero_mi: float) -> float:
+def dist_mi(distances: dict, key: str):
+    """Miles to one anchor, tolerating both stored shapes.
+
+    Distances used to be `{anchor: miles}` and are now
+    `{anchor: {"mi": ..., "basis": ...}}`. Rows written before walk routing
+    existed are still in the database, so every reader goes through here
+    rather than assuming a shape.
+    """
+    entry = (distances or {}).get(key)
+    if isinstance(entry, dict):
+        return entry.get("mi")
+    return entry
+
+
+def walk_min(distances: dict, key: str):
+    """Routed walking minutes to one anchor, or None if never routed."""
+    entry = (distances or {}).get(key)
+    return entry.get("walk_min") if isinstance(entry, dict) else None
+
+
+def proximity_credit(miles: float, full_mi: float, zero_mi: float) -> float:
     """1.0 inside `full_mi`, 0.0 beyond `zero_mi`, linear in between.
 
     Linear rather than exponential decay on purpose: the falloff is easy to
     read off the dashboard and easy to retune in config.json.
     """
-    if dist_mi is None:
+    if miles is None:
         return 0.0
-    if dist_mi <= full_mi:
+    if miles <= full_mi:
         return 1.0
-    if dist_mi >= zero_mi or zero_mi <= full_mi:
+    if miles >= zero_mi or zero_mi <= full_mi:
         return 0.0
-    return (zero_mi - dist_mi) / (zero_mi - full_mi)
+    return (zero_mi - miles) / (zero_mi - full_mi)

@@ -9,6 +9,7 @@ Push alerts fire after a crawl for listings above the score threshold that we
 have not alerted on before, capped per run and silenced during quiet hours.
 """
 import html
+import json
 import logging
 import threading
 import time
@@ -17,6 +18,9 @@ import urllib.parse
 import urllib.request
 from datetime import datetime
 from zoneinfo import ZoneInfo
+
+import geo
+import sqft
 
 log = logging.getLogger("bot")
 TG_API = "https://api.telegram.org/bot{token}/{method}"
@@ -28,13 +32,23 @@ HELP = """\
 /houses — houses, townhomes &amp; duplexes only
 /apts — apartment complexes only
 /drops — rent cuts since we first saw them
-/near [mi] — closest to MLK Jr Station
+/near [mi] — closest walk to MLK Jr Station
 /detail &lt;id&gt; — everything on one listing
+/like &lt;id&gt; [why] · /dislike &lt;id&gt; [why]
+/learn — what your ratings imply about the weights
 /pin &lt;id&gt; [note] · /unpin &lt;id&gt; · /pinned
 /crawl — run a crawl now
 /sources — per-source health from the last run
 /stats — corpus summary + baselines
 /help — this"""
+
+
+def _loads(raw, default=None):
+    """json.loads that yields `default` rather than raising on junk."""
+    try:
+        return json.loads(raw) if raw else (default if default is not None else {})
+    except (ValueError, TypeError):
+        return default if default is not None else {}
 
 
 def tg_call(token, method, params, timeout=20):
@@ -56,7 +70,6 @@ def money(n):
 
 def fmt_listing(r, rank=None, verbose=False):
     """One listing as a Telegram HTML block."""
-    import json
     head = esc(r.get("property_name") or r.get("title") or r.get("address")
                or "untitled")
     if r.get("url"):
@@ -69,23 +82,27 @@ def fmt_listing(r, rank=None, verbose=False):
     if r.get("baths"):
         bits.append(f"{r['baths']:g}ba")
     if r.get("sqft"):
-        bits.append(f"{r['sqft']:,}sf")
+        # '~' flags a size the sqft model estimated rather than one reported.
+        tilde = "~" if r.get("sqft_basis") == "estimated" else ""
+        bits.append(f"{tilde}{r['sqft']:,}sf")
         if r.get("price"):
             bits.append(f"${r['price'] / r['sqft']:.2f}/sf")
 
-    try:
-        d = json.loads(r.get("distances") or "{}")
-    except ValueError:
-        d = {}
-    geo = []
-    if d.get("mueller") is not None:
-        geo.append(f"{d['mueller']}mi Mueller")
-    if d.get("mlk_station") is not None:
-        geo.append(f"{d['mlk_station']}mi MLK stn")
+    d = _loads(r.get("distances"))
+    where = []
+    for key, label in (("mueller", "Mueller"), ("mlk_station", "MLK stn")):
+        miles = geo.dist_mi(d, key)
+        if miles is None:
+            continue
+        minutes = geo.walk_min(d, key)
+        where.append(f"{miles}mi {label}"
+                     + (f" ({minutes:.0f}min walk)" if minutes else ""))
+    if r.get("walk_credit") is not None:
+        where.append(f"walk {r['walk_credit'] * 100:.0f}")
 
     lines = [f"{prefix}<b>{head}</b>",
              f"   {' · '.join(bits)}",
-             f"   {esc(r.get('prop_type'))} · {' · '.join(geo) or 'no geo'}"
+             f"   {esc(r.get('prop_type'))} · {' · '.join(where) or 'no geo'}"
              f" · <code>{r['id'][:8]}</code> · {r.get('score', 0):.0f}pts"]
     if r.get("address") and r.get("property_name"):
         lines.insert(1, f"   {esc(r['address'])}")
@@ -94,6 +111,11 @@ def fmt_listing(r, rank=None, verbose=False):
             lines.append(f"   floorplan {esc(r['unit'])}")
         if r.get("available"):
             lines.append(f"   available {esc(r['available'])}")
+        if r.get("walk_counts"):
+            counts = _loads(r.get("walk_counts"))
+            if counts:
+                lines.append("   on foot: " + ", ".join(
+                    f"{k} {v}" for k, v in sorted(counts.items())))
         if r.get("description"):
             lines.append(f"   <i>{esc(r['description'][:300])}</i>")
         lines.append(f"   source: {esc(r.get('source'))}")
@@ -251,13 +273,36 @@ class Bot:
                 lim = float(args[0])
             except (IndexError, ValueError):
                 lim = 1.0
-            import json as _json
-            rows = [r for r in self.store.top(200)
-                    if (_json.loads(r.get("distances") or "{}")
-                        .get("mlk_station", 99)) <= lim]
-            rows.sort(key=lambda r: _json.loads(r["distances"])["mlk_station"])
-            return fmt_list(rows[:10], f"within {lim}mi of MLK Jr Station",
+
+            def station_mi(r):
+                """Walking miles to the station, or a sentinel that sorts last."""
+                d = geo.dist_mi(_loads(r.get("distances")), "mlk_station")
+                return d if d is not None else 99.0
+
+            rows = [r for r in self.store.top(400) if station_mi(r) <= lim]
+            rows.sort(key=station_mi)
+            return fmt_list(rows[:10], f"within {lim}mi walk of MLK Jr Station",
                             f"nothing within {lim}mi — try /near 1.5")
+
+        if cmd in ("like", "dislike"):
+            if not args:
+                return (f"usage: /{cmd} &lt;id&gt; [why]\n"
+                        "the reason is optional but it is what the tuner "
+                        "actually learns from")
+            r = self.store.find(args[0])
+            if not r:
+                return f"no listing starting {esc(args[0])}"
+            reason = " ".join(args[1:])
+            self.store.add_feedback(r["id"], cmd, reason, source="telegram")
+            name = esc(r.get("property_name") or r.get("title") or r["id"][:8])
+            mark = "♥ liked" if cmd == "like" else "✗ passed"
+            tail = f"\n   <i>{esc(reason)}</i>" if reason else ""
+            return f"{mark} — {name}{tail}"
+
+        if cmd == "learn":
+            import learn
+            analysis = learn.analyse(self.store, self.cfg)
+            return f"<pre>{esc(learn.report(analysis))}</pre>"
 
         if cmd == "detail":
             if not args:
@@ -310,8 +355,7 @@ class Bot:
             runs = self.store.last_runs(1)
             if not runs:
                 return "no crawls yet"
-            import json as _json
-            detail = _json.loads(runs[0].get("detail") or "{}")
+            detail = _loads(runs[0].get("detail"))
             lines = [f"<b>sources</b> — last run {runs[0]['started']}"]
             for name, d in detail.items():
                 if d.get("error"):
@@ -330,13 +374,34 @@ class Bot:
                 f"   {s['houses'] or 0} housey · {s['apts'] or 0} apartments",
                 f"   avg {money(s['avg_price'])} · cheapest {money(s['min_price'])}",
             ]
+            if s.get("best_ppsf"):
+                lines.append(f"   best ${s['best_ppsf']:.2f}/sf "
+                             "(measured sizes only)")
+            if s.get("avg_walk") is not None:
+                lines.append(f"   avg walkability {s['avg_walk'] * 100:.0f}")
+
             base = self.store.baselines()
             if base:
                 lines.append("\n<b>your baselines</b>")
                 for b in base:
                     name = esc(b.get("property_name") or b.get("title"))
-                    sqft = f" · {b['sqft']:,}sf" if b.get("sqft") else ""
-                    lines.append(f"   {name} — {money(b['price'])}{sqft}")
+                    size = f" · {b['sqft']:,}sf" if b.get("sqft") else ""
+                    lines.append(f"   {name} — {money(b['price'])}{size}")
+
+                # The actual question: does anything beat them on space?
+                best = self.store.top(1, prop_types=(
+                    "house", "townhouse", "duplex", "condo"))
+                cmp_ = sqft.compare_to_baselines(best[0], base) if best else {}
+                if cmp_:
+                    name = esc(best[0].get("property_name")
+                               or best[0].get("title") or "top house")
+                    lines.append(f"\n<b>vs. best house</b> ({name})")
+                    lines.append(f"   ${cmp_['ppsf']}/sf vs "
+                                 f"${cmp_['baseline_ppsf']}/sf "
+                                 f"({cmp_['ppsf_delta_pct']:+d}%)")
+                    if "extra_sqft" in cmp_:
+                        lines.append(f"   {cmp_['extra_sqft']:+,}sf vs the "
+                                     f"{cmp_['baseline_sqft']:,}sf baseline")
             if runs:
                 lines.append(f"\nlast crawl {runs[0]['started']}")
             return "\n".join(lines)

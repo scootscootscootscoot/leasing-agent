@@ -14,6 +14,7 @@ Usage
     ./agent.py              run the daemon (what systemd starts)
     ./agent.py crawl        one crawl, print the summary, exit
     ./agent.py top [n]      print the current best matches
+    ./agent.py learn        what the like/dislike feedback says so far
     ./agent.py serve        dashboard only, no crawling
 """
 import json
@@ -26,6 +27,7 @@ import time
 
 import bot as botmod
 import dashboard
+import geo
 import sources
 from crawler import crawl
 from store import Store
@@ -80,6 +82,11 @@ def load_secrets() -> dict:
     return secrets
 
 
+def _mi(miles):
+    """Format a distance for the CLI table, or '  ?' when we have none."""
+    return f"{miles:.1f}mi" if isinstance(miles, (int, float)) else "  ?mi"
+
+
 def setup_logging(level=logging.INFO):
     logging.basicConfig(
         level=level, stream=sys.stdout,
@@ -110,10 +117,22 @@ def main():
         n = int(sys.argv[2]) if len(sys.argv) > 2 else 10
         for r in store.top(n):
             d = json.loads(r.get("distances") or "{}")
+            walk = r.get("walk_credit")
+            walk_col = f"{walk * 100:>3.0f}" if walk is not None else "  —"
+            # '~' marks a size the sqft model estimated rather than one a
+            # source actually reported.
+            mark = "~" if r.get("sqft_basis") == "estimated" else " "
+            name = (r.get("property_name") or r.get("title") or "")[:44]
             print(f"{r['score']:5.1f}  ${r['price'] or 0:>6,}  "
-                  f"{(r.get('beds') or 0):g}bd {(r.get('sqft') or 0):>5}sf  "
-                  f"{d.get('mueller', '?')}mi/{d.get('mlk_station', '?')}mi  "
-                  f"{(r.get('property_name') or r.get('title') or '')[:44]}")
+                  f"{(r.get('beds') or 0):g}bd {mark}{r.get('sqft') or 0:>5}sf  "
+                  f"{_mi(geo.dist_mi(d, 'mueller'))}/"
+                  f"{_mi(geo.dist_mi(d, 'mlk_station'))}  "
+                  f"walk {walk_col}  {name}")
+        return 0
+
+    if cmd == "learn":
+        import learn
+        print(learn.report(learn.analyse(store, cfg)))
         return 0
 
     if cmd == "serve":

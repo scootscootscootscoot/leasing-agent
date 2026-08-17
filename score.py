@@ -1,20 +1,27 @@
 """score — rank a listing against what we actually want.
 
-The brief: a 2-bedroom near Mueller, $1500-3000, walkable-ish to MLK Jr
+The brief: a 2-bedroom near Mueller, $1500-3000, genuinely walkable to MLK Jr
 Station, and ideally a house with more space than the Mueller apartment
-comparables (The Platform, Starlight). That maps to five weighted components,
+comparables (The Platform, Starlight). That maps to six weighted components,
 all of them 0..1 before weighting so the config weights stay readable:
 
     price        cheaper inside the budget band scores higher
     space        square footage between the config floor and ceiling
+    walk         density of what you can reach on foot (see walk.py)
     mueller      proximity credit to the Mueller anchor
     mlk_station  proximity credit to the rail station
     house_bonus  full credit for anything that is not an apartment complex
 
 Weights live in config.json. They do not need to sum to 100 — the result is
 normalised by the total — so you can bump one without rebalancing the rest.
+
+Anchor proximity prefers the *routed walking* distance from walk.py when the
+crawler managed to fetch one, and falls back to crow-flies otherwise. Those
+are different numbers around here — I-35 and the rail corridor turn short
+straight lines into long walks — so `dists` records which basis was used.
 """
 from geo import anchor_distances, proximity_credit
+from sqft import space_credit
 
 # Property types that count as "more space than an apartment" for the bonus.
 HOUSEY = {"house", "townhouse", "duplex", "condo"}
@@ -35,43 +42,53 @@ def price_credit(price, budget_min, budget_max) -> float:
     return (budget_max - price) / (budget_max - budget_min)
 
 
-def space_credit(sqft, floor, ceiling) -> float:
-    """Square footage scaled between the config floor and ceiling.
-
-    Missing sqft scores 0.4 rather than 0: plenty of good Craigslist house
-    listings just omit it, and zeroing them would bury real candidates.
-    """
-    if not sqft:
-        return 0.4
-    if sqft <= floor:
-        return 0.0
-    if sqft >= ceiling or ceiling <= floor:
-        return 1.0
-    return (sqft - floor) / (ceiling - floor)
-
-
 def score_listing(rec: dict, cfg: dict) -> tuple:
-    """Return (score 0-100, {component: credit}, {anchor: miles})."""
+    """Return (score 0-100, {component: credit}, {anchor: distance info}).
+
+    `rec` may carry two optional enrichments from the crawler:
+        walk_credit  0..1 amenity density from walk.py
+        walk_routes  {anchor_key: {"mi": float, "min": float}} routed walks
+
+    Both are optional by design. If the public routers are down the listing
+    still scores, just on crow-flies — degraded, never broken.
+    """
     search = cfg["search"]
     anchors = cfg["anchors"]
     weights = cfg["weights"]
     space_cfg = cfg.get("space", {})
 
-    dists = anchor_distances(rec.get("lat"), rec.get("lon"), anchors)
+    straight = anchor_distances(rec.get("lat"), rec.get("lon"), anchors)
+    routed = rec.get("walk_routes") or {}
 
     parts = {
         "price": (price_credit(rec.get("price"), search["budget_min"],
                                search["budget_max"]), weights.get("price", 0)),
         "space": (space_credit(rec.get("sqft"),
                                space_cfg.get("sqft_floor", 700),
-                               space_cfg.get("sqft_ceiling", 1800)),
+                               space_cfg.get("sqft_ceiling", 1800),
+                               rec.get("sqft_basis", "reported")),
                   weights.get("space", 0)),
+        "walk": (float(rec.get("walk_credit") or 0.0),
+                 weights.get("walk", 0)),
         "house_bonus": (1.0 if rec.get("prop_type") in HOUSEY else 0.0,
                         weights.get("house_bonus", 0)),
     }
+
+    dists = {}
     for key, a in anchors.items():
+        walk = routed.get(key) or {}
+        # Prefer the real walk. Credit thresholds in config are expressed as
+        # walking distances, so feeding them a straight line is the lenient
+        # reading — noted in `basis` so the dashboard can say which it used.
+        miles = walk.get("mi", straight.get(key))
+        dists[key] = {
+            "mi": miles,
+            "straight_mi": straight.get(key),
+            "walk_min": walk.get("min"),
+            "basis": "routed" if walk.get("mi") is not None else "straight",
+        }
         parts[key] = (
-            proximity_credit(dists.get(key), a.get("full_credit_mi", 0.5),
+            proximity_credit(miles, a.get("full_credit_mi", 0.5),
                              a.get("zero_credit_mi", 3.0)),
             a.get("weight", 0),
         )
