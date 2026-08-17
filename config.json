@@ -1,0 +1,69 @@
+{
+  "search": {
+    "budget_min": 1500,
+    "budget_max": 3000,
+    "beds_min": 2,
+    "beds_max": 3,
+    "baths_min": 1,
+    "sqft_min": 700,
+    "radius_mi": 3.0,
+    "primary_anchor": "mueller"
+  },
+
+  "anchors": {
+    "mueller": {
+      "label": "Mueller",
+      "lat": 30.2988,
+      "lon": -97.7048,
+      "full_credit_mi": 0.75,
+      "zero_credit_mi": 3.5,
+      "weight": 25
+    },
+    "mlk_station": {
+      "label": "MLK Jr Station",
+      "lat": 30.2799,
+      "lon": -97.7135,
+      "full_credit_mi": 0.6,
+      "zero_credit_mi": 2.5,
+      "weight": 20
+    }
+  },
+
+  "weights": {
+    "price": 25,
+    "space": 20,
+    "house_bonus": 10
+  },
+
+  "space": {
+    "sqft_floor": 700,
+    "sqft_ceiling": 1800
+  },
+
+  "baselines": [
+    {"name": "The Platform", "match": ["platform"], "note": "liked — Mueller"},
+    {"name": "Starlight", "match": ["starlight"], "note": "liked — Mueller"}
+  ],
+
+  "crawl": {
+    "interval_min": 90,
+    "alert_min_score": 70,
+    "alert_max_per_run": 6,
+    "quiet_hours": [22, 7],
+    "timezone": "America/Chicago",
+    "stale_days": 14
+  },
+
+  "dashboard": {
+    "host": "0.0.0.0",
+    "port": 8810
+  },
+
+  "sources": {
+    "redfin": true,
+    "craigslist": true,
+    "zillow": false,
+    "hotpads": false,
+    "instagram": false
+  }
+}

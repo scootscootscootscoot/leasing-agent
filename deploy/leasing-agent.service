@@ -1,0 +1,12 @@
+[Unit]
+Description=leasing-agent — 24/7 Mueller / MLK Jr Station rental crawler
+After=network-online.target
+
+[Service]
+WorkingDirectory=%h/leasing_agent
+ExecStart=/usr/bin/python3 %h/leasing_agent/agent.py
+Restart=always
+RestartSec=15
+
+[Install]
+WantedBy=default.target

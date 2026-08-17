@@ -1,0 +1,19 @@
+# secrets — never commit
+.env
+*.env
+!.env.example
+
+# local state
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+
+# editor / os
+.DS_Store
+*.swp
