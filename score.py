@@ -20,11 +20,54 @@ crawler managed to fetch one, and falls back to crow-flies otherwise. Those
 are different numbers around here — I-35 and the rail corridor turn short
 straight lines into long walks — so `dists` records which basis was used.
 """
+from datetime import datetime, timedelta, timezone
+
 from geo import anchor_distances, proximity_credit
 from sqft import space_credit
 
 # Property types that count as "more space than an apartment" for the bonus.
 HOUSEY = {"house", "townhouse", "duplex", "condo"}
+
+# Condition and amenity signals, learned from the first round of dashboard
+# feedback: every "old / outdated / vintage" dislike was invisible to the
+# weighted components, and "really nice but not pool" showed amenities were
+# too. Keywords are matched against title + description, case-insensitive.
+# Positive and negative cancel within a group, so "renovated 1950s kitchen"
+# nets out instead of double-counting the era.
+CONDITION_POS = ("renovated", "remodeled", "updated", "newly", "modern",
+                 "upgraded", "gut rehab", "brand new")
+CONDITION_NEG = ("vintage", "dated", "outdated", "original condition",
+                 "as-is", "as is", "fixer", "unupdated", "old charm",
+                 "charming 19", "1940s", "1950s", "1960s", "1970s")
+AMENITY_POS = ("pool", "in-unit laundry", "w/d in unit", "washer/dryer in unit",
+               "washer and dryer in unit", "gym", "fitness center")
+
+
+def _keyword_hits(text, words):
+    t = (text or "").lower()
+    return sum(1 for w in words if w in t)
+
+
+def condition_credit(rec) -> float:
+    """1.0 renovated, 0.0 visibly dated, 0.5 no signal either way."""
+    text = " ".join(str(rec.get(k) or "") for k in ("title", "description"))
+    pos = _keyword_hits(text, CONDITION_POS)
+    neg = _keyword_hits(text, CONDITION_NEG)
+    if pos > neg:
+        return 1.0
+    if neg > pos:
+        return 0.0
+    return 0.5
+
+
+def amenity_credit(rec) -> float:
+    """1.0 when a wanted amenity is mentioned, 0.5 when nothing is said.
+
+    Absence of the word "pool" is not proof of absence of a pool, so the
+    neutral case sits at 0.5 rather than 0 — this nudges rather than gates.
+    """
+    text = " ".join(str(rec.get(k) or "") for k in ("title", "description"))
+    return 1.0 if _keyword_hits(text, AMENITY_POS) else 0.5
 
 
 def price_credit(price, budget_min, budget_max) -> float:
@@ -72,6 +115,8 @@ def score_listing(rec: dict, cfg: dict) -> tuple:
                  weights.get("walk", 0)),
         "house_bonus": (1.0 if rec.get("prop_type") in HOUSEY else 0.0,
                         weights.get("house_bonus", 0)),
+        "condition": (condition_credit(rec), weights.get("condition", 0)),
+        "amenity": (amenity_credit(rec), weights.get("amenity", 0)),
     }
 
     dists = {}
@@ -97,6 +142,11 @@ def score_listing(rec: dict, cfg: dict) -> tuple:
     if not total_w:
         return 0.0, {}, dists
     score = sum(c * w for c, w in parts.values()) / total_w * 100
+    # Property-type preference, learned from feedback ("dont like duplexes
+    # they should be downgraded"). A multiplier rather than a weighted
+    # component so it can push a listing *down*, not just fail to lift it.
+    ptype_w = (cfg.get("prop_type_weights") or {}).get(rec.get("prop_type"), 1.0)
+    score *= ptype_w
     return round(score, 1), {k: round(c, 3) for k, (c, _) in parts.items()}, dists
 
 
@@ -112,9 +162,37 @@ def passes_filters(rec: dict, cfg: dict) -> bool:
     baths = rec.get("baths")
     if baths is not None and baths < s.get("baths_min", 0):
         return False
+    if not _available_soon(rec.get("available"),
+                           s.get("available_within_days", 45)):
+        return False
     # sqft is advisory, not a gate: many house listings omit it entirely and
     # dropping them would defeat the point of looking for houses.
     return True
+
+
+def _available_soon(value, within_days) -> bool:
+    """Gate on the advertised availability date.
+
+    Feedback surfaced a "not available" listing as a dislike — a unit that
+    cannot actually be leased soon is noise no matter how well it scores.
+    rent.com gives ISO dates or "TODAY"; anything dated further out than
+    `within_days` is dropped. Unknown or unparseable values pass: Craigslist
+    and Redfin rarely say, and silence is not unavailability.
+    """
+    if not value:
+        return True
+    v = str(value).strip()
+    if v.upper() in ("TODAY", "NOW", "AVAILABLE NOW", "IMMEDIATE"):
+        return True
+    try:
+        dt = datetime.fromisoformat(v.replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    # Sources disagree on timezone: rent.com sends "...Z", Redfin sends a
+    # naive local stamp. Treat naive as UTC rather than crash the pipeline.
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt <= datetime.now(timezone.utc) + timedelta(days=within_days)
 
 
 def is_baseline(rec: dict, cfg: dict) -> bool:

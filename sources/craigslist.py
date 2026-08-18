@@ -23,6 +23,8 @@ delta-encoded id and date. The layout, confirmed against live postings:
 Anything unrecognised is ignored rather than guessed at, so a layout change
 degrades to thinner records instead of wrong ones.
 """
+import re
+
 from . import SourceError
 
 NAME = "craigslist"
@@ -53,6 +55,30 @@ def _prop_type(title: str) -> str:
     if "apartment" in t or "apt" in t:
         return "apartment"
     return "unknown"
+
+
+# "2/2 Apt", "3bd/1.5ba", "2-Bed, 2-Bath Duplex", "4+ 2 house".
+_BATH_PATTERNS = (
+    re.compile(r"\b\d+(?:\.\d+)?[\s-]*(?:ba|bath|baths|bathroom)\b", re.I),
+    re.compile(r"\b\d+\s*/\s*(\d+(?:\.\d+)?)\b"),  # "2/2" — beds/baths
+)
+
+
+def _baths_from_title(title):
+    """Best-effort bath count from the free-text title, else None."""
+    t = title or ""
+    m = _BATH_PATTERNS[0].search(t)
+    if m:
+        num = re.match(r"\d+(?:\.\d+)?", m.group(0))
+        if num:
+            return float(num.group(0))
+    m = _BATH_PATTERNS[1].search(t)
+    if m:
+        try:
+            return float(m.group(1))
+        except ValueError:
+            return None
+    return None
 
 
 def fetch(ctx) -> list:
@@ -128,7 +154,9 @@ def _parse(item, min_id, host):
             "lat": lat, "lon": lon,
             "price": price,
             "beds": float(beds) if isinstance(beds, (int, float)) else None,
-            "baths": None,
+            # The search JSON carries no bath field; titles often do
+            # ("2/2 Apt", "2-Bed, 2-Bath Duplex"). Parse what we can.
+            "baths": _baths_from_title(title),
             "sqft": int(sqft) if isinstance(sqft, (int, float)) and sqft else None,
             "prop_type": _prop_type(title),
             "property_name": None,

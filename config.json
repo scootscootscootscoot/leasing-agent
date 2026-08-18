@@ -7,6 +7,7 @@
     "baths_min": 1,
     "sqft_min": 700,
     "radius_mi": 3.0,
+    "available_within_days": 45,
     "primary_anchor": "mueller"
   },
   "anchors": {
@@ -31,7 +32,17 @@
     "price": 25,
     "space": 20,
     "walk": 15,
-    "house_bonus": 10
+    "house_bonus": 10,
+    "condition": 12,
+    "amenity": 5
+  },
+  "prop_type_weights": {
+    "house": 1.0,
+    "townhouse": 1.0,
+    "condo": 1.0,
+    "duplex": 0.85,
+    "apartment": 1.0,
+    "unknown": 1.0
   },
   "space": {
     "sqft_floor": 700,

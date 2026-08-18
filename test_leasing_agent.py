@@ -11,6 +11,7 @@ import json
 import os
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 
 import learn
 import score
@@ -108,6 +109,53 @@ class TestScore(unittest.TestCase):
         self.assertTrue(score.is_baseline({"property_name": "The Platform"}, CFG))
         self.assertTrue(score.is_baseline({"title": "Starlight Village"}, CFG))
         self.assertFalse(score.is_baseline({"title": "Casa Del Rio"}, CFG))
+
+    def test_condition_keywords(self):
+        """Learned from feedback: 'old'/'vintage' dislikes were invisible."""
+        self.assertEqual(score.condition_credit(
+            {"title": "Gorgeous renovated house"}), 1.0)
+        self.assertEqual(score.condition_credit(
+            {"title": "1950's Vintage Austin Home"}), 0.0)
+        self.assertEqual(score.condition_credit({"title": "2bd apartment"}), 0.5)
+        # pos/neg cancel: "renovated 1950s" is not double-counted
+        self.assertEqual(score.condition_credit(
+            {"title": "Renovated 1950s bungalow"}), 0.5)
+
+    def test_amenity_keywords(self):
+        self.assertEqual(score.amenity_credit(
+            {"description": "steps from the pool"}), 1.0)
+        self.assertEqual(score.amenity_credit(
+            {"description": "nothing special"}), 0.5)
+
+    def test_renovated_outranks_vintage_all_else_equal(self):
+        base = {"price": 2000, "beds": 2, "baths": 1, "sqft": 1000,
+                "prop_type": "house", "lat": 30.2988, "lon": -97.7048}
+        good, _, _ = score.score_listing(
+            {**base, "title": "Renovated home"}, CFG)
+        bad, _, _ = score.score_listing(
+            {**base, "title": "Vintage 1950s home"}, CFG)
+        self.assertGreater(good, bad)
+
+    def test_duplex_multiplier(self):
+        """Feedback: 'dont like duplexes they should be downgraded'."""
+        base = {"price": 2000, "beds": 2, "baths": 1, "sqft": 1000,
+                "lat": 30.2988, "lon": -97.7048}
+        dup, _, _ = score.score_listing({**base, "prop_type": "duplex"}, CFG)
+        house, _, _ = score.score_listing({**base, "prop_type": "house"}, CFG)
+        self.assertAlmostEqual(dup / house, 0.85, places=2)
+
+    def test_availability_gate(self):
+        """Feedback: a 'not available' unit surfaced as a card."""
+        ok = {"price": 2000, "beds": 2, "baths": 2}
+        self.assertTrue(score.passes_filters({**ok, "available": "TODAY"}, CFG))
+        self.assertTrue(score.passes_filters({**ok, "available": None}, CFG))
+        far = (datetime.now(timezone.utc) + timedelta(days=90)).isoformat()
+        self.assertFalse(score.passes_filters({**ok, "available": far}, CFG))
+        soon = (datetime.now(timezone.utc) + timedelta(days=10)).isoformat()
+        self.assertTrue(score.passes_filters({**ok, "available": soon}, CFG))
+        # Redfin sends naive ISO stamps (no tz) — must not crash the gate.
+        naive_far = (datetime.now() + timedelta(days=90)).isoformat()
+        self.assertFalse(score.passes_filters({**ok, "available": naive_far}, CFG))
 
 
 class TestDedupe(unittest.TestCase):
