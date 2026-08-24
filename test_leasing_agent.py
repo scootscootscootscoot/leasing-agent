@@ -144,6 +144,29 @@ class TestScore(unittest.TestCase):
         house, _, _ = score.score_listing({**base, "prop_type": "house"}, CFG)
         self.assertAlmostEqual(dup / house, 0.85, places=2)
 
+    def test_section_buckets_are_disjoint_and_townhomes_stand_alone(self):
+        """Townhomes were invisible folded in with houses — own bucket now.
+
+        The buckets are presentation only: a townhome must still be HOUSEY so
+        it keeps the full house_bonus, and must not appear under Houses too.
+        """
+        self.assertEqual(score.TOWNHOUSE_TYPES, ("townhouse",))
+        self.assertNotIn("townhouse", score.HOUSE_TYPES)
+        self.assertIn("townhouse", score.HOUSEY)
+
+        buckets = (score.HOUSE_TYPES, score.TOWNHOUSE_TYPES,
+                   score.APARTMENT_TYPES)
+        flat = [t for b in buckets for t in b]
+        self.assertEqual(len(flat), len(set(flat)), "a type is shown twice")
+
+        base = {"price": 2000, "beds": 2, "baths": 1, "sqft": 1000,
+                "lat": 30.2988, "lon": -97.7048}
+        town, parts, _ = score.score_listing({**base, "prop_type": "townhouse"},
+                                             CFG)
+        house, _, _ = score.score_listing({**base, "prop_type": "house"}, CFG)
+        self.assertEqual(parts["house_bonus"], 1.0)
+        self.assertAlmostEqual(town, house, places=1)
+
     def test_availability_gate(self):
         """Feedback: a 'not available' unit surfaced as a card."""
         ok = {"price": 2000, "beds": 2, "baths": 2}

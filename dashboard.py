@@ -15,6 +15,7 @@ import traceback
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+import score
 import walk
 
 log = logging.getLogger("dashboard")
@@ -63,7 +64,7 @@ padding:2px 6px;border:1px solid var(--rule);border-radius:4px;color:var(--faded
 .bar{height:3px;background:var(--rule);border-radius:2px;margin-top:7px;overflow:hidden}
 .bar i{display:block;height:100%;background:var(--gold)}
 .empty{color:var(--faint);font-size:13.5px;padding:10px 0}
-.split{display:grid;grid-template-columns:1fr 1fr;gap:22px}
+.split{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:22px}
 .card.liked{border-color:#3f5136;background:#1d2318}
 .card.disliked{border-color:#4a2f2b;opacity:.62}
 .est{color:var(--faint);font-style:italic}
@@ -427,34 +428,39 @@ def render(store, cfg) -> str:
 <div class="split">
 <div>
 <h2><span class="num">III</span> Houses</h2>
-{section(lambda: cards(store.top(8, prop_types=("house", "townhouse", "duplex", "condo")),
+{section(lambda: cards(store.top(8, prop_types=score.HOUSE_TYPES),
                        "no houses in range yet", verdicts=verdicts))}
 </div>
 <div>
-<h2><span class="num">IV</span> Apartments</h2>
-{section(lambda: cards(store.top(8, prop_types=("apartment",)),
+<h2><span class="num">IV</span> Townhomes</h2>
+{section(lambda: cards(store.top(8, prop_types=score.TOWNHOUSE_TYPES),
+                       "no townhomes in range yet", verdicts=verdicts))}
+</div>
+<div>
+<h2><span class="num">V</span> Apartments</h2>
+{section(lambda: cards(store.top(8, prop_types=score.APARTMENT_TYPES),
                        "no apartments in range yet", verdicts=verdicts))}
 </div>
 </div>
 
-<h2><span class="num">V</span> Rent cuts</h2>
+<h2><span class="num">VI</span> Rent cuts</h2>
 {section(lambda: cards(store.price_drops(6), "no price drops seen yet", True,
                        verdicts=verdicts))}
 
-<h2><span class="num">VI</span> Pinned</h2>
+<h2><span class="num">VII</span> Pinned</h2>
 {section(lambda: cards(store.pinned(), "nothing pinned — /pin <id> in Telegram",
                        verdicts=verdicts))}
 
-<h2><span class="num">VII</span> Your baselines</h2>
+<h2><span class="num">VIII</span> Your baselines</h2>
 {section(baselines)}
 
-<h2><span class="num">VIII</span> What you said</h2>
+<h2><span class="num">IX</span> What you said</h2>
 {section(notes)}
 
-<h2><span class="num">IX</span> What that implies</h2>
+<h2><span class="num">X</span> What that implies</h2>
 {section(tuner)}
 
-<h2><span class="num">X</span> Sources</h2>
+<h2><span class="num">XI</span> Sources</h2>
 <div class="tiles">{section(sources_tiles)}</div>
 
 <footer>

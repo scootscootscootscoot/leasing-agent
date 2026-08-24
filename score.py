@@ -28,6 +28,19 @@ from sqft import space_credit
 # Property types that count as "more space than an apartment" for the bonus.
 HOUSEY = {"house", "townhouse", "duplex", "condo"}
 
+# How the dashboard and the bot bucket listings into sections. These are a
+# presentation split, not a scoring one — everything in HOUSEY still earns the
+# same house_bonus regardless of which bucket it is shown under.
+#
+# Townhomes get their own bucket rather than being folded in with the houses.
+# There are enough of them around Mueller to read on their own, and inside a
+# combined section they were being buried: the best townhome scores in the
+# low 60s, under every house and duplex above it, so it never appeared.
+# `unknown` deliberately belongs to no bucket — it still shows in Best matches.
+HOUSE_TYPES = ("house", "duplex", "condo")
+TOWNHOUSE_TYPES = ("townhouse",)
+APARTMENT_TYPES = ("apartment",)
+
 # Condition and amenity signals, learned from the first round of dashboard
 # feedback: every "old / outdated / vintage" dislike was invisible to the
 # weighted components, and "really nice but not pool" showed amenities were

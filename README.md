@@ -205,7 +205,8 @@ the error if it does not line up.
 ```
 /top [n]      best-scoring listings right now
 /new [n]      most recently found
-/houses       houses, townhomes & duplexes only
+/houses       houses, duplexes & condos only
+/townhomes    townhomes only
 /apts         apartment complexes only
 /drops        rent cuts since we first saw them
 /near [mi]    closest to MLK Jr Station

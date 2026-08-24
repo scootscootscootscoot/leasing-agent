@@ -20,6 +20,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import geo
+import score
 import sqft
 
 log = logging.getLogger("bot")
@@ -29,7 +30,8 @@ HELP = """\
 <b>leasing agent</b>
 /top [n] — best-scoring listings right now
 /new [n] — most recently found
-/houses — houses, townhomes &amp; duplexes only
+/houses — houses, duplexes &amp; condos only
+/townhomes — townhomes only
 /apts — apartment complexes only
 /drops — rent cuts since we first saw them
 /near [mi] — closest walk to MLK Jr Station
@@ -247,14 +249,20 @@ class Bot:
             return fmt_list(self.store.newest(n_arg()), "most recently found")
 
         if cmd == "houses":
-            rows = self.store.top(n_arg(), prop_types=(
-                "house", "townhouse", "duplex", "condo"))
-            return fmt_list(rows, "houses, townhomes & duplexes",
+            rows = self.store.top(n_arg(), prop_types=score.HOUSE_TYPES)
+            return fmt_list(rows, "houses, duplexes & condos",
                             "no houses in range yet — the Mueller area runs "
                             "apartment-heavy, try /top or widen radius_mi")
 
+        if cmd in ("townhomes", "townhouses"):
+            rows = self.store.top(n_arg(), prop_types=score.TOWNHOUSE_TYPES)
+            return fmt_list(rows, "townhomes",
+                            "no townhomes in range yet — try /top or widen "
+                            "radius_mi")
+
         if cmd == "apts":
-            return fmt_list(self.store.top(n_arg(), prop_types=("apartment",)),
+            return fmt_list(self.store.top(n_arg(),
+                                           prop_types=score.APARTMENT_TYPES),
                             "apartment complexes")
 
         if cmd == "drops":
@@ -389,8 +397,7 @@ class Bot:
                     lines.append(f"   {name} — {money(b['price'])}{size}")
 
                 # The actual question: does anything beat them on space?
-                best = self.store.top(1, prop_types=(
-                    "house", "townhouse", "duplex", "condo"))
+                best = self.store.top(1, prop_types=tuple(sorted(score.HOUSEY)))
                 cmp_ = sqft.compare_to_baselines(best[0], base) if best else {}
                 if cmp_:
                     name = esc(best[0].get("property_name")
