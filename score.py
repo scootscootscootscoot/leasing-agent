@@ -14,6 +14,9 @@ all of them 0..1 before weighting so the config weights stay readable:
 
 Weights live in config.json. They do not need to sum to 100 — the result is
 normalised by the total — so you can bump one without rebalancing the rest.
+After weighting, two multipliers can pull a score *down*: a property-type
+preference (duplexes) and Mueller-proper scrutiny for anything more than a
+mile out (see scrutiny_mult).
 
 Anchor proximity prefers the *routed walking* distance from walk.py when the
 crawler managed to fetch one, and falls back to crow-flies otherwise. Those
@@ -81,6 +84,35 @@ def amenity_credit(rec) -> float:
     """
     text = " ".join(str(rec.get(k) or "") for k in ("title", "description"))
     return 1.0 if _keyword_hits(text, AMENITY_POS) else 0.5
+
+
+def scrutiny_mult(straight_mi, cfg_block: dict) -> float:
+    """Score multiplier for distance from Mueller proper.
+
+    Direct instruction (2026-08-29): "we really really want to be as close as
+    possible to Mueller proper ... anything more than a mile will come under
+    heavy scrutiny." The feedback agrees — every 1.3 mi+ listing drew "too
+    far" — so this is a penalty on top of the anchor credit, not instead of
+    it: 1.0 inside `beyond_mi`, tapering to `floor_mult` at `floor_at_mi`.
+
+    Measured on the straight line, not the routed walk, on purpose. Routed is
+    always the longer number, and this is a punishment, so it uses the lenient
+    basis: only places that are more than a mile out however you measure get
+    cut. Being on the wrong side of I-35 or the rail line already costs walk
+    and anchor credit. Unlocated listings pass untouched — they already earn
+    zero proximity credit, and 0 * penalty teaches nothing.
+    """
+    if straight_mi is None:
+        return 1.0
+    beyond = cfg_block.get("beyond_mi", 1.0)
+    floor_at = cfg_block.get("floor_at_mi", 2.5)
+    floor = cfg_block.get("floor_mult", 0.55)
+    if straight_mi <= beyond:
+        return 1.0
+    if straight_mi >= floor_at or floor_at <= beyond:
+        return floor
+    frac = (straight_mi - beyond) / (floor_at - beyond)
+    return 1.0 - frac * (1.0 - floor)
 
 
 def price_credit(price, budget_min, budget_max) -> float:
@@ -160,7 +192,14 @@ def score_listing(rec: dict, cfg: dict) -> tuple:
     # component so it can push a listing *down*, not just fail to lift it.
     ptype_w = (cfg.get("prop_type_weights") or {}).get(rec.get("prop_type"), 1.0)
     score *= ptype_w
-    return round(score, 1), {k: round(c, 3) for k, (c, _) in parts.items()}, dists
+    # Mueller-proper scrutiny (see scrutiny_mult). Recorded in the credits
+    # only when it bit, so the dashboard snapshot shows why a score sagged.
+    mult = scrutiny_mult(straight.get("mueller"), cfg.get("mueller_scrutiny") or {})
+    score *= mult
+    credits = {k: round(c, 3) for k, (c, _) in parts.items()}
+    if mult < 1.0:
+        credits["mueller_scrutiny"] = round(mult, 3)
+    return round(score, 1), credits, dists
 
 
 def passes_filters(rec: dict, cfg: dict) -> bool:

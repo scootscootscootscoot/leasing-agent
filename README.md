@@ -35,21 +35,30 @@ Set in `config.json`, no code changes needed:
 
 ### Scoring
 
-Six weighted components, each 0–1 before weighting, normalised to 0–100.
+Weighted components, each 0–1 before weighting, normalised to 0–100.
 Weights live in `config.json` and do not need to sum to anything in
 particular.
 
 | component | weight | what earns credit |
 |---|---:|---|
+| `mueller` | 35 | walking proximity to Mueller |
 | `price` | 25 | cheaper inside the budget band |
-| `mueller` | 25 | walking proximity to Mueller |
 | `space` | 20 | square footage, 700 → 1800 sq ft |
 | `mlk_station` | 20 | walking proximity to the rail station |
 | `walk` | 15 | what you can reach on foot (see below) |
+| `condition` | 12 | renovated/updated language; dated language scores 0 |
 | `house_bonus` | 10 | anything that is not an apartment complex |
+| `amenity` | 5 | pool, in-unit laundry, gym mentioned |
 
 Proximity credit is full inside `full_credit_mi`, zero past `zero_credit_mi`,
 linear between — easy to read off the dashboard and easy to retune.
+
+After weighting, two multipliers can pull a score down: `prop_type_weights`
+(duplexes ×0.85, from feedback) and `mueller_scrutiny` — being close to
+Mueller proper is the whole point, so anything more than `beyond_mi` (1 mi,
+straight-line) out is multiplied down, bottoming at `floor_mult` (×0.55) by
+`floor_at_mi` (2.5 mi). Straight-line on purpose: it is the lenient basis, so
+only places that are over a mile out however you measure get cut.
 
 ## Walkability
 

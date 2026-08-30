@@ -15,9 +15,9 @@
       "label": "Mueller",
       "lat": 30.2988,
       "lon": -97.7048,
-      "full_credit_mi": 0.75,
-      "zero_credit_mi": 3.5,
-      "weight": 25
+      "full_credit_mi": 0.5,
+      "zero_credit_mi": 2.5,
+      "weight": 35
     },
     "mlk_station": {
       "label": "MLK Jr Station",
@@ -35,6 +35,11 @@
     "house_bonus": 10,
     "condition": 12,
     "amenity": 5
+  },
+  "mueller_scrutiny": {
+    "beyond_mi": 1.0,
+    "floor_at_mi": 2.5,
+    "floor_mult": 0.55
   },
   "prop_type_weights": {
     "house": 1.0,
@@ -55,7 +60,8 @@
   },
   "baselines": [
     {"name": "The Platform", "match": ["platform"], "note": "liked — Mueller"},
-    {"name": "Starlight", "match": ["starlight"], "note": "liked — Mueller"}
+    {"name": "Starlight", "match": ["starlight"], "note": "liked — Mueller"},
+    {"name": "The George", "match": ["the george"], "note": "liked — Mueller proper"}
   ],
   "crawl": {
     "interval_min": 90,

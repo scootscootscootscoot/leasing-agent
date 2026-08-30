@@ -108,7 +108,10 @@ class TestScore(unittest.TestCase):
     def test_baseline_matching(self):
         self.assertTrue(score.is_baseline({"property_name": "The Platform"}, CFG))
         self.assertTrue(score.is_baseline({"title": "Starlight Village"}, CFG))
+        self.assertTrue(score.is_baseline({"property_name": "The George"}, CFG))
         self.assertFalse(score.is_baseline({"title": "Casa Del Rio"}, CFG))
+        # "the george" must not fire on streets that merely contain George
+        self.assertFalse(score.is_baseline({"address": "1200 George Ave"}, CFG))
 
     def test_condition_keywords(self):
         """Learned from feedback: 'old'/'vintage' dislikes were invisible."""
@@ -166,6 +169,31 @@ class TestScore(unittest.TestCase):
         house, _, _ = score.score_listing({**base, "prop_type": "house"}, CFG)
         self.assertEqual(parts["house_bonus"], 1.0)
         self.assertAlmostEqual(town, house, places=1)
+
+    def test_scrutiny_mult_shape(self):
+        """Instruction 2026-08-29: 'more than a mile comes under heavy
+        scrutiny' — full credit inside a mile, floor past floor_at_mi."""
+        block = {"beyond_mi": 1.0, "floor_at_mi": 2.5, "floor_mult": 0.55}
+        self.assertEqual(score.scrutiny_mult(0.3, block), 1.0)
+        self.assertEqual(score.scrutiny_mult(1.0, block), 1.0)
+        self.assertEqual(score.scrutiny_mult(3.0, block), 0.55)
+        mid = score.scrutiny_mult(1.75, block)
+        self.assertGreater(mid, 0.55)
+        self.assertLess(mid, 1.0)
+        self.assertEqual(score.scrutiny_mult(None, block), 1.0)
+
+    def test_over_a_mile_is_penalised_in_the_score(self):
+        base = {"price": 2000, "beds": 2, "baths": 2, "sqft": 1100,
+                "prop_type": "house"}
+        # ~0.06 mi and ~1.5 mi straight-line from the Mueller anchor.
+        near, near_parts, _ = score.score_listing(
+            {**base, "lat": 30.2990, "lon": -97.7050}, CFG)
+        far, far_parts, _ = score.score_listing(
+            {**base, "lat": 30.2799, "lon": -97.7280}, CFG)
+        self.assertGreater(near, far)
+        self.assertNotIn("mueller_scrutiny", near_parts)
+        self.assertIn("mueller_scrutiny", far_parts)
+        self.assertLess(far_parts["mueller_scrutiny"], 1.0)
 
     def test_availability_gate(self):
         """Feedback: a 'not available' unit surfaced as a card."""
